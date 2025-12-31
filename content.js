@@ -448,10 +448,10 @@
     console.log('开始采集本页所有商品');
     
     // 检查登录状态
-    const isLoggedIn = await checkLoginStatus();
-    console.log('登录状态:', isLoggedIn);
+    const checkResult = await checkLoginStatus();
+    console.log('登录状态检查结果:', checkResult);
     
-    if (!isLoggedIn) {
+    if (!checkResult.isLoggedIn) {
       console.log('未登录，显示登录模态框');
       showAuthModal(handleGlobalCollect);
       return;
@@ -487,10 +487,10 @@
     console.log('采集单个商品:', asin);
     
     // 检查登录状态
-    const isLoggedIn = await checkLoginStatus();
-    console.log('登录状态:', isLoggedIn);
+    const checkResult = await checkLoginStatus();
+    console.log('登录状态检查结果:', checkResult);
     
-    if (!isLoggedIn) {
+    if (!checkResult.isLoggedIn) {
       console.log('未登录，显示登录模态框');
       showAuthModal(() => handleProductCollect(asin, button));
       return;
@@ -526,12 +526,16 @@
           }
           
           const errorMsg = saveResult.error || '未知错误';
+          console.error(`保存失败 ${asin}:`, errorMsg);
           
-          // 检测JWT过期错误
-          if (errorMsg.includes('登录已过期') || 
-              errorMsg.includes('JWT expired') ||
+          // 检测JWT过期错误或未登录错误
+          if (errorMsg.includes('登录') || 
+              errorMsg.includes('未登录') || 
+              errorMsg.includes('过期') || 
+              errorMsg.includes('JWT') ||
               errorMsg.includes('请重新登录')) {
-            console.log('检测到登录过期，显示登录模态框');
+            console.log('检测到登录问题，显示登录模态框');
+            alert('登录已过期或未登录，请重新登录');
             showAuthModal(() => {
               // 登录成功后重试采集
               handleProductCollect(asin, button);
@@ -566,15 +570,19 @@
           }
           
           const errorMsg = response?.error || '未知错误';
+          console.error(`任务添加失败 ${asin}:`, errorMsg);
           
-          // 检测JWT过期错误
-          if (errorMsg.includes('登录已过期') || 
-              errorMsg.includes('JWT expired') ||
+          // 检测JWT过期错误或未登录错误
+          if (errorMsg.includes('登录') || 
+              errorMsg.includes('未登录') || 
+              errorMsg.includes('过期') || 
+              errorMsg.includes('JWT') ||
               errorMsg.includes('请重新登录')) {
-            console.log('检测到登录过期，显示登录模态框');
+            console.log('检测到登录问题，显示登录模态框');
+            alert('登录已过期或未登录，请重新登录');
             showAuthModal(() => {
               // 登录成功后重试采集
-              handleSingleProductCollect(button, asin);
+              handleProductCollect(asin, button);
             });
             return;
           }
@@ -591,15 +599,18 @@
       
       const errorMsg = error.message || '未知错误';
       
-      // 检测JWT过期错误
-      if (errorMsg.includes('登录已过期') || 
-          errorMsg.includes('JWT expired') ||
+      // 检测JWT过期错误或未登录错误
+      if (errorMsg.includes('登录') || 
+          errorMsg.includes('未登录') || 
+          errorMsg.includes('过期') || 
+          errorMsg.includes('JWT') ||
           errorMsg.includes('请重新登录') ||
           errorMsg.includes('401')) {
-        console.log('检测到登录过期，显示登录模态框');
+        console.log('检测到登录问题，显示登录模态框');
+        alert('登录已过期或未登录，请重新登录');
         showAuthModal(() => {
           // 登录成功后重试采集
-          handleSingleProductCollect(button, asin);
+          handleProductCollect(asin, button);
         });
         return;
       }
@@ -966,8 +977,36 @@
       if (saveResult.success) {
         collectionState.successCount++;
       } else {
+        const errorMsg = saveResult.error || '未知错误';
+        console.error(`保存失败 ${asin}:`, errorMsg);
+        
+        // 检测登录相关错误
+        if (errorMsg.includes('登录') || 
+            errorMsg.includes('未登录') || 
+            errorMsg.includes('过期') || 
+            errorMsg.includes('JWT') ||
+            errorMsg.includes('请重新登录')) {
+          console.log('检测到登录问题，停止采集并显示登录模态框');
+          collectionState.isCollecting = false;
+          collectionState.isPaused = true;
+          // 不增加 failureCount，因为这个还没真正失败，登录后可以重试当前的
+          // 但当前的 currentIndex 还没加，所以 return 后下次还会试当前的吗？
+          // 下面有 currentIndex++，如果不 return 就会跳过。
+          // 所以这里 return 是对的。
+          
+          saveCollectionState();
+          
+          alert('登录已过期或未登录，请重新登录');
+          showAuthModal(() => {
+            // 登录成功后继续采集
+            collectionState.isCollecting = true;
+            collectionState.isPaused = false;
+            startCollection();
+          });
+          return;
+        }
+        
         collectionState.failureCount++;
-        console.error(`保存失败 ${asin}:`, saveResult.error);
       }
       
     } catch (error) {

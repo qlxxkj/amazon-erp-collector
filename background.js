@@ -65,24 +65,82 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 console.log('消息监听器已设置');
 
+// 辅助函数：刷新Token
+async function refreshToken() {
+  if (!currentSession || !currentSession.refresh_token) {
+    throw new Error('No refresh token available');
+  }
+
+  console.log('正在尝试刷新Token...');
+  try {
+    const response = await fetch(`${SUPABASE_CONFIG.url}/auth/v1/token?grant_type=refresh_token`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_CONFIG.anonKey,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ refresh_token: currentSession.refresh_token })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error_description || data.message || 'Token refresh failed');
+    }
+
+    // 更新 session
+    // 注意：刷新返回的数据可能不包含 user 对象，所以我们需要保留原来的 user 对象
+    const user = currentSession.user;
+    currentSession = { ...data, user: data.user || user };
+    
+    await chrome.storage.local.set({ supabaseSession: currentSession });
+    console.log('Token 刷新成功');
+    return currentSession;
+  } catch (error) {
+    console.error('Token 刷新失败:', error);
+    currentSession = null;
+    await chrome.storage.local.remove('supabaseSession');
+    throw error;
+  }
+}
+
 // 辅助函数：发送请求到Supabase
 async function supabaseRequest(endpoint, options = {}) {
   const url = `${SUPABASE_CONFIG.url}${endpoint}`;
   
-  const headers = {
-    'apikey': SUPABASE_CONFIG.anonKey,
-    'Content-Type': 'application/json',
-    ...options.headers
+  const getHeaders = () => {
+    const headers = {
+      'apikey': SUPABASE_CONFIG.anonKey,
+      'Content-Type': 'application/json',
+      ...options.headers
+    };
+    
+    if (currentSession && currentSession.access_token) {
+      headers['Authorization'] = `Bearer ${currentSession.access_token}`;
+    }
+    return headers;
   };
   
-  if (currentSession && currentSession.access_token) {
-    headers['Authorization'] = `Bearer ${currentSession.access_token}`;
-  }
-  
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     ...options,
-    headers
+    headers: getHeaders()
   });
+  
+  // 如果是 401 错误，尝试刷新 Token 并重试
+  if (response.status === 401) {
+    console.log('收到 401 错误，尝试刷新 Token...');
+    try {
+      await refreshToken();
+      // 使用新的 Token 重试请求
+      response = await fetch(url, {
+        ...options,
+        headers: getHeaders()
+      });
+    } catch (e) {
+      console.log('Token 刷新失败或重试失败:', e);
+      // 刷新失败，继续处理原始响应（将在下方抛出错误）
+    }
+  }
   
   if (!response.ok) {
     let errorMessage = '请求失败';
@@ -97,6 +155,7 @@ async function supabaseRequest(endpoint, options = {}) {
           response.status === 401) {
         console.log('检测到JWT过期，清除会话');
         currentSession = null;
+        chrome.storage.local.remove('supabaseSession');
         errorMessage = '登录已过期，请重新登录';
       }
     } catch (e) {
@@ -106,6 +165,7 @@ async function supabaseRequest(endpoint, options = {}) {
       if (response.status === 401) {
         console.log('检测到401未授权错误，清除会话');
         currentSession = null;
+        chrome.storage.local.remove('supabaseSession');
         errorMessage = '登录已过期，请重新登录';
       }
     }
@@ -320,45 +380,59 @@ async function handleLogout(sendResponse) {
 // 检查登录状态
 async function handleCheckLoginStatus(sendResponse) {
   try {
-    chrome.storage.local.get(['supabaseSession'], (result) => {
-      const session = result.supabaseSession;
-      
-      if (!session || !session.access_token) {
-        console.log('未找到登录会话');
-        sendResponse({ 
-          success: true, 
-          isLoggedIn: false, 
-          isExpired: false,
-          message: '未登录' 
-        });
-        return;
-      }
-      
-      currentSession = session;
-      
-      // 检查是否过期
-      const isExpired = session.expires_at ? Date.now() >= session.expires_at * 1000 : false;
-      
-      if (isExpired) {
-        console.log('登录会话已过期');
-        currentSession = null;
-        chrome.storage.local.remove('supabaseSession');
-        sendResponse({ 
-          success: true, 
-          isLoggedIn: false, 
-          isExpired: true,
-          message: '登录已过期' 
-        });
-      } else {
-        console.log('登录状态正常');
+    const result = await chrome.storage.local.get(['supabaseSession']);
+    const session = result.supabaseSession;
+    
+    if (!session || !session.access_token) {
+      console.log('未找到登录会话');
+      sendResponse({ 
+        success: true, 
+        isLoggedIn: false, 
+        isExpired: false,
+        message: '未登录' 
+      });
+      return;
+    }
+    
+    currentSession = session;
+    
+    // 检查是否过期
+    // Supabase 的 expires_at 是秒，Date.now() 是毫秒
+    const now = Date.now() / 1000;
+    const expiresAt = session.expires_at || 0;
+    const isExpired = expiresAt ? now >= expiresAt : false;
+    // 提前 5 分钟 (300秒) 刷新
+    const isAboutToExpire = expiresAt ? now >= expiresAt - 300 : false;
+    
+    if (isExpired || isAboutToExpire) {
+      console.log('登录会话已过期或即将过期，尝试刷新Token...');
+      try {
+        await refreshToken();
+        console.log('Token刷新成功，登录状态正常');
         sendResponse({ 
           success: true, 
           isLoggedIn: true, 
           isExpired: false,
           message: '已登录' 
         });
+      } catch (e) {
+        console.log('Token刷新失败，登录会话已过期');
+        sendResponse({ 
+          success: true, 
+          isLoggedIn: false, 
+          isExpired: true,
+          message: '登录已过期' 
+        });
       }
-    });
+    } else {
+      console.log('登录状态正常');
+      sendResponse({ 
+        success: true, 
+        isLoggedIn: true, 
+        isExpired: false,
+        message: '已登录' 
+      });
+    }
   } catch (error) {
     console.error('检查登录状态失败:', error);
     sendResponse({ 
