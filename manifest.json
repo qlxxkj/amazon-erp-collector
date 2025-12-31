@@ -1,0 +1,66 @@
+{
+  "manifest_version": 3,
+  "name": "亚马逊商品采集器",
+  "version": "1.0.0",
+  "description": "亚马逊商品数据采集插件，支持批量采集、用户认证和数据存储",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "webRequest",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "https://www.amazon.com/*",
+    "https://www.amazon.co.jp/*",
+    "https://www.amazon.de/*",
+    "https://www.amazon.co.uk/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.com/s*",
+        "https://www.amazon.com/Best-Sellers*",
+        "https://www.amazon.com/gp/new-releases*",
+        "https://www.amazon.com/dp/*",
+        "https://www.amazon.com/gp/product/*",
+        "https://www.amazon.co.jp/s*",
+        "https://www.amazon.co.jp/Best-Sellers*",
+        "https://www.amazon.co.jp/gp/new-releases*",
+        "https://www.amazon.co.jp/dp/*",
+        "https://www.amazon.co.jp/gp/product/*",
+        "https://www.amazon.de/s*",
+        "https://www.amazon.de/Best-Sellers*",
+        "https://www.amazon.de/gp/new-releases*",
+        "https://www.amazon.de/dp/*",
+        "https://www.amazon.de/gp/product/*",
+        "https://www.amazon.co.uk/s*",
+        "https://www.amazon.co.uk/Best-Sellers*",
+        "https://www.amazon.co.uk/gp/new-releases*",
+        "https://www.amazon.co.uk/dp/*",
+        "https://www.amazon.co.uk/gp/product/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icon.png"
+    }
+  },
+  "icons": {
+    "48": "icon.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["auth-modal.html", "auth-modal.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
