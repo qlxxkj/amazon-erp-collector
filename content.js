@@ -646,20 +646,33 @@
   // 检查登录状态
   function checkLoginStatus() {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'checkLoginStatus' }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('检查登录状态失败:', chrome.runtime.lastError);
-          resolve({ isLoggedIn: false, isExpired: false });
-        } else if (response && response.success) {
-          resolve({ 
-            isLoggedIn: response.isLoggedIn, 
-            isExpired: response.isExpired,
-            message: response.message 
-          });
-        } else {
-          resolve({ isLoggedIn: false, isExpired: false });
-        }
-      });
+      // 设置超时，防止无限等待
+      const timeoutId = setTimeout(() => {
+        console.error('检查登录状态超时');
+        resolve({ isLoggedIn: false, isExpired: false, message: '检查超时' });
+      }, 3000);
+
+      try {
+        chrome.runtime.sendMessage({ action: 'checkLoginStatus' }, (response) => {
+          clearTimeout(timeoutId);
+          if (chrome.runtime.lastError) {
+            console.error('检查登录状态失败:', chrome.runtime.lastError);
+            resolve({ isLoggedIn: false, isExpired: false });
+          } else if (response && response.success) {
+            resolve({ 
+              isLoggedIn: response.isLoggedIn, 
+              isExpired: response.isExpired,
+              message: response.message 
+            });
+          } else {
+            resolve({ isLoggedIn: false, isExpired: false });
+          }
+        });
+      } catch (e) {
+        clearTimeout(timeoutId);
+        console.error('发送消息失败:', e);
+        resolve({ isLoggedIn: false, isExpired: false });
+      }
     });
   }
   
@@ -724,7 +737,7 @@
       width: 100%;
       height: 100%;
       background: rgba(0,0,0,0.5);
-      z-index: 10000;
+      z-index: 2147483647;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -968,11 +981,32 @@
       const delay = CONFIG.delayMin + Math.random() * (CONFIG.delayMax - CONFIG.delayMin);
       await sleep(delay);
       
-      // 采集数据
-      const productData = await collectProductData(asin);
+      const pageType = detectPageType();
+      let saveResult;
       
-      // 保存到Supabase
-      const saveResult = await saveToSupabase(productData);
+      if (pageType === 'product') {
+        // 商品详情页，直接采集
+        const productData = await collectProductData(asin);
+        // 保存到Supabase
+        saveResult = await saveToSupabase(productData);
+      } else {
+        // 列表页，调用后台从详情页采集
+        console.log(`列表页采集模式：正在请求后台采集 ${asin} ...`);
+        const response = await new Promise((resolve) => {
+          chrome.runtime.sendMessage({
+            action: 'collectFromDetailPage',
+            asin: asin,
+            returnUrl: window.location.href
+          }, resolve);
+        });
+        
+        // 构造saveResult格式以统一处理
+        if (response && response.success) {
+          saveResult = { success: true };
+        } else {
+          saveResult = { success: false, error: response?.error || '后台采集失败' };
+        }
+      }
       
       if (saveResult.success) {
         collectionState.successCount++;
@@ -1312,29 +1346,92 @@
     return null;
   }
   
+  // 清洗图片URL，获取高清原图
+  function cleanImageUrl(url) {
+    if (!url) return null;
+    // 移除尺寸修饰符，例如 ._AC_US40_ 或 ._AC_SY200_ 等
+    // 常见的模式: 
+    // https://m.media-amazon.com/images/I/71s7h+l1pZL._AC_SY879_.jpg -> https://m.media-amazon.com/images/I/71s7h+l1pZL.jpg
+    return url.replace(/\._[A-Z]{2}.*?_\./, '.');
+  }
+
   // 提取其他图片
   function extractOtherImages() {
-    const otherImages = [];
+    const images = new Set();
     
-    // 从altImages容器提取
-    const altImages = document.querySelectorAll('#altImages img, .a-spacing-small img, .itemNo0 img');
-    altImages.forEach(img => {
-      const src = img.getAttribute('src') || img.getAttribute('data-src');
-      if (src && !src.includes('spinner') && !otherImages.includes(src)) {
-        otherImages.push(src);
+    // 1. 尝试从脚本中提取（HiRes图片）
+    // 查找包含 colorImages 的脚本内容
+    const scripts = document.querySelectorAll('script');
+    for (const script of scripts) {
+      const content = script.textContent;
+      if (content && content.includes('colorImages')) {
+        try {
+          // 匹配 'colorImages': { ... }
+          const match = content.match(/'colorImages':\s*({.*?}),\s*'/);
+          if (match && match[1]) {
+            const data = JSON.parse(match[1]);
+            if (data && data.initial) {
+               data.initial.forEach(img => {
+                 if (img.hiRes) images.add(img.hiRes);
+                 else if (img.large) images.add(img.large);
+                 else if (img.main && img.main[0]) images.add(img.main[0]);
+               });
+            }
+          }
+        } catch (e) {
+          // 忽略解析错误
+        }
       }
-    });
+    }
     
-    // 从主图容器提取
-    const mainImages = document.querySelectorAll('#landingImage, #imgBlkFront, #imgBlkBack');
-    mainImages.forEach(img => {
-      const src = img.getAttribute('src');
-      if (src && !otherImages.includes(src)) {
-        otherImages.push(src);
+    // 2. 如果脚本提取失败或为空，从DOM提取并清洗
+    if (images.size === 0) {
+      // 主图
+      const mainImg = document.querySelector('#landingImage, #imgBlkFront, #imgBlkBack');
+      if (mainImg) {
+        let src = mainImg.getAttribute('data-old-hires') || mainImg.getAttribute('data-a-dynamic-image') || mainImg.src;
+        // 如果是 dynamic image json
+        if (src && src.startsWith('{')) {
+           try {
+             const json = JSON.parse(src);
+             // 取第一个key作为URL（通常是最大的）
+             const keys = Object.keys(json);
+             if (keys.length > 0) src = keys[0];
+           } catch(e) {}
+        }
+        if (src) images.add(cleanImageUrl(src));
       }
-    });
+      
+      // 缩略图列表
+      const thumbnails = document.querySelectorAll('#altImages li.item img, #imageBlockThumbs .imageBox img, .a-spacing-small img.a-dynamic-image');
+      thumbnails.forEach(img => {
+        const src = img.src || img.getAttribute('data-src');
+        if (src) {
+          images.add(cleanImageUrl(src));
+        }
+      });
+    }
     
-    return otherImages;
+    // 3. 过滤和清洗
+    const result = Array.from(images).filter(url => {
+        if (!url) return false;
+        const lowerUrl = url.toLowerCase();
+        // 过滤特定图标和无效图片
+        if (lowerUrl.includes('play-icon') || 
+            lowerUrl.includes('video') || 
+            lowerUrl.includes('transparent-pixel') || 
+            lowerUrl.includes('sprite') ||
+            lowerUrl.includes('prime') || // 过滤Prime图标
+            lowerUrl.includes('badge') || // 过滤徽章
+            lowerUrl.includes('icon') ||  // 过滤图标
+            lowerUrl.includes('logo') ||  // 过滤Logo
+            lowerUrl.includes('button') || // 过滤按钮
+            lowerUrl.includes('stars') ||  // 过滤星星评分
+            lowerUrl.includes('loader')) return false;
+        return true;
+    }).map(cleanImageUrl);
+    
+    return [...new Set(result)]; // 去重
   }
   
   // 提取产品尺寸和重量
@@ -1589,36 +1686,121 @@
     return 0;
   }
   
-  // 提取变体信息
+  // 提取变体信息（所有可用选项）
   function extractVariants() {
     const variants = [];
     
-    // 从变体选择器提取
-    const variantElements = document.querySelectorAll('#variation_color_name li, #variation_size_name li, #variation_pattern_name li');
-    variantElements.forEach(el => {
-      const variantText = el.textContent.trim();
-      if (variantText) {
-        variants.push(variantText);
-      }
+    // 查找所有变体维度容器
+    // 通常是 id="variation_color_name", id="variation_size_name" 等
+    const dimensionContainers = document.querySelectorAll('div[id^="variation_"]');
+    
+    dimensionContainers.forEach(container => {
+        const labelEl = container.querySelector('.a-form-label');
+        // 提取维度名称，如 "Color", "Size"
+        let name = labelEl ? labelEl.textContent.trim().replace(':', '') : '';
+        
+        // 如果名字为空，尝试从ID推断
+        if (!name) {
+            const id = container.id;
+            if (id.includes('color')) name = 'Color';
+            else if (id.includes('size')) name = 'Size';
+            else if (id.includes('style')) name = 'Style';
+            else if (id.includes('pattern')) name = 'Pattern';
+        }
+        
+        if (name) {
+            const options = [];
+            const lis = container.querySelectorAll('ul li');
+            
+            lis.forEach(li => {
+                // 尝试获取值
+                let value = '';
+                const img = li.querySelector('img');
+                if (img) {
+                    value = img.getAttribute('alt') || '';
+                }
+                
+                if (!value) {
+                    const button = li.querySelector('button');
+                    if (button) value = button.textContent.trim();
+                }
+                
+                if (!value) {
+                    value = li.textContent.trim();
+                }
+                
+                // 清理值（移除价格等额外信息）
+                if (value) {
+                    value = value.split('\n')[0].trim();
+                }
+                
+                if (value) {
+                  // 获取ASIN
+                  const asin = li.getAttribute('data-defaultasin') || 
+                              li.getAttribute('data-asin') ||
+                              li.getAttribute('data-dp-url')?.match(/\/dp\/([A-Z0-9]{10})/)?.[1];
+                  
+                  // 获取缩略图（如果有）
+                  const thumb = img ? cleanImageUrl(img.src) : null;
+                  
+                  options.push({
+                      value: value,
+                      image: thumb,
+                      asin: asin || null
+                  });
+                }
+            });
+            
+            if (options.length > 0) {
+                variants.push({
+                    name: name,
+                    options: options
+                });
+            }
+        }
     });
     
     return variants;
   }
   
-  // 提取变体属性
+  // 提取当前选中的变体属性
   function extractVariantAttributes() {
     const attributes = {};
     
-    // 提取颜色
-    const colorElement = document.querySelector('#variation_color_name .selection');
-    if (colorElement) {
-      attributes.color = colorElement.textContent.trim();
-    }
+    // 方法1：从变体区域的 selection 标签提取
+    const selectionElements = document.querySelectorAll('.selection');
+    selectionElements.forEach(el => {
+        const row = el.closest('.a-row') || el.closest('div[id^="variation_"]');
+        if (row) {
+            const labelEl = row.querySelector('.a-form-label');
+            if (labelEl) {
+                const key = labelEl.textContent.trim().replace(':', '');
+                const val = el.textContent.trim();
+                if (key && val) {
+                    attributes[key] = val;
+                }
+            }
+        }
+    });
     
-    // 提取尺寸
-    const sizeElement = document.querySelector('#variation_size_name .selection');
-    if (sizeElement) {
-      attributes.size = sizeElement.textContent.trim();
+    // 方法2：如果方法1失效，尝试特定的ID
+    if (Object.keys(attributes).length === 0) {
+        const mappings = {
+            '#variation_color_name': 'Color',
+            '#variation_size_name': 'Size',
+            '#variation_style_name': 'Style',
+            '#variation_pattern_name': 'Pattern'
+        };
+        
+        for (const [selector, name] of Object.entries(mappings)) {
+            const container = document.querySelector(selector);
+            if (container) {
+                const valEl = container.querySelector('.selection');
+                if (valEl) {
+                    attributes[name] = valEl.textContent.trim();
+                }
+            }
+        }
     }
     
     return attributes;
