@@ -287,6 +287,21 @@ async function handleSaveProduct(request, sendResponse) {
     
     const productData = request.productData;
     const userId = currentSession.user.id;
+
+    // 检查是否存在重复ASIN
+    try {
+      const checkUrl = `/rest/v1/listings?user_id=eq.${userId}&asin=eq.${productData.asin}&select=id`;
+      const existingProducts = await supabaseRequest(checkUrl);
+      
+      if (existingProducts && existingProducts.length > 0) {
+        console.log(`商品 ${productData.asin} 已存在，跳过保存`);
+        sendResponse({ success: true, message: '商品已存在', skipped: true });
+        return;
+      }
+    } catch (checkError) {
+      console.warn('检查重复商品失败，尝试直接保存:', checkError);
+      // 继续执行保存逻辑
+    }
     
     const productToSave = {
       ...productData,

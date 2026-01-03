@@ -33,11 +33,17 @@
     currentIndex: 0,
     successCount: 0,
     failureCount: 0,
-    totalItems: 0
+    totalItems: 0,
+    // 多页采集状态
+    mode: 'single', // 'single' | 'multi'
+    targetPages: 1,
+    pagesCollected: 0
   };
   
   // DOM 元素
   let globalCollectBtn = null;
+  let multiPageInput = null;
+  let multiPageBtn = null;
   let progressBar = null;
   let progressContainer = null;
   
@@ -52,13 +58,64 @@
       addCollectButtonsToProducts();
       setupEventListeners();
       
+      // 监听DOM变化，处理动态加载的内容
+      const observer = new MutationObserver((mutations) => {
+        let shouldRefresh = false;
+        for (const mutation of mutations) {
+          if (mutation.addedNodes.length > 0) {
+            shouldRefresh = true;
+            break;
+          }
+        }
+        
+        if (shouldRefresh) {
+          // 使用防抖，避免过于频繁调用
+          if (window.collectButtonTimeout) {
+            clearTimeout(window.collectButtonTimeout);
+          }
+          window.collectButtonTimeout = setTimeout(() => {
+            addCollectButtonsToProducts();
+            addGlobalCollectButton(); // 确保全局按钮不被覆盖
+          }, 1000);
+        }
+      });
+      
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+
       // 恢复之前的状态
       chrome.storage.local.get(['collectionState'], (result) => {
         if (result.collectionState) {
           collectionState = result.collectionState;
+          
+          // 如果状态是正在采集，则尝试恢复
           if (collectionState.isCollecting) {
+            console.log('检测到正在进行的采集任务，准备恢复...');
+            
+            // 如果队列为空（可能是翻页后），重新获取ASIN
+            if (collectionState.queue.length === 0) {
+              console.log('队列为空，重新获取本页商品...');
+              const asins = getAllProductASINs();
+              if (asins.length > 0) {
+                collectionState.queue = asins;
+                collectionState.totalItems = asins.length;
+                collectionState.currentIndex = 0;
+                saveCollectionState();
+              } else {
+                console.log('本页未找到商品，停止采集');
+                collectionState.isCollecting = false;
+                saveCollectionState();
+                return;
+              }
+            }
+            
             showProgressBar();
-            updateProgressBar();
+            // 延迟一点开始，确保页面完全就绪
+            setTimeout(() => {
+                startCollection();
+            }, 2000);
           }
         }
       });
@@ -89,33 +146,115 @@
   
   // 添加全局采集按钮
   function addGlobalCollectButton() {
-    const existingBtn = document.querySelector('#amazon-collector-global-btn');
-    if (existingBtn) {
-      console.log('全局采集按钮已存在');
+    const existingContainer = document.querySelector('#amazon-collector-global-container');
+    if (existingContainer) {
+      console.log('全局采集面板已存在');
       return;
     }
     
-    console.log('正在添加全局采集按钮...');
-    const btn = document.createElement('button');
-    btn.id = 'amazon-collector-global-btn';
-    btn.className = 'amazon-collector-btn amazon-collector-global';
-    btn.innerHTML = '<span class="collector-icon">📥</span> 采集本页所有';
-    btn.title = '采集本页所有商品';
+    console.log('正在添加全局采集面板...');
     
-    // 添加到页面右上角
+    // 容器
     const container = document.createElement('div');
     container.id = 'amazon-collector-global-container';
     container.style.cssText = `
       position: fixed;
       top: 220px;
       right: 20px;
-      z-index: 9999;
+      z-index: 2147483647;
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 160px;
+      font-family: sans-serif;
     `;
+
+    // 1. 采集本页所有按钮
+    const btn = document.createElement('button');
+    btn.id = 'amazon-collector-global-btn';
+    btn.className = 'amazon-collector-btn amazon-collector-global';
+    btn.innerHTML = '<span class="collector-icon">📥</span> 采集本页所有';
+    btn.title = '采集本页所有商品';
+    btn.style.cssText = `
+      width: 100%;
+      box-sizing: border-box;
+    `;
+    
+    // 2. 分割线
+    const divider = document.createElement('div');
+    divider.style.cssText = `
+      height: 1px;
+      background: #eee;
+      margin: 0;
+    `;
+
+    // 3. 批量采集区域
+    const multiPageContainer = document.createElement('div');
+    multiPageContainer.style.cssText = `
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    `;
+    
+    const label = document.createElement('label');
+    label.innerText = '批量采集(页数):';
+    label.style.fontSize = '12px';
+    label.style.color = '#333';
+    
+    const inputRow = document.createElement('div');
+    inputRow.style.cssText = `
+      display: flex;
+      gap: 5px;
+    `;
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.id = 'amazon-collector-pages-input';
+    input.min = '1';
+    input.value = '10';
+    input.style.cssText = `
+      width: 50px;
+      padding: 4px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      font-size: 12px;
+    `;
+    
+    const multiBtn = document.createElement('button');
+    multiBtn.id = 'amazon-collector-multi-btn';
+    multiBtn.className = 'amazon-collector-btn';
+    multiBtn.innerHTML = '开始批量';
+    multiBtn.style.cssText = `
+      flex: 1;
+      padding: 4px;
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+    `;
+    
+    inputRow.appendChild(input);
+    inputRow.appendChild(multiBtn);
+    
+    multiPageContainer.appendChild(label);
+    multiPageContainer.appendChild(inputRow);
+
+    // 组装
     container.appendChild(btn);
+    container.appendChild(divider);
+    container.appendChild(multiPageContainer);
+    
     document.body.appendChild(container);
     
     globalCollectBtn = btn;
-    console.log('全局采集按钮已添加');
+    multiPageInput = input;
+    multiPageBtn = multiBtn;
+    
+    console.log('全局采集面板已添加');
   }
   
   // 为每个商品添加采集按钮
@@ -146,6 +285,8 @@
             '[data-p13n-asin-metadata]',
             '.zg-item',
             '.p13n-gridItem',
+            'div[id^="p13n-asin-index"]',
+            '.a-cardui[data-asin]',
             '[data-asin]'
           ];
           break;
@@ -227,6 +368,7 @@
     } else if (pageType === 'bestseller' || pageType === 'new-releases') {
       // Bestseller/New Releases页：尝试找到图片容器，将按钮添加到图片旁边
       const imageContainer = product.querySelector('.a-spacing-mini') || 
+                            product.querySelector('.p13n-sc-image')?.closest('div') ||
                             product.querySelector('img')?.closest('div');
       
       if (imageContainer) {
@@ -245,14 +387,25 @@
         
         imageContainer.appendChild(btn);
       } else {
-        // 如果找不到图片容器，添加到商品元素末尾
+        // 如果找不到图片容器，添加到商品元素开头
         const btnContainer = document.createElement('div');
         btnContainer.className = 'amazon-collector-btn-container';
         btnContainer.style.cssText = `
           margin: 8px 0;
           text-align: center;
+          position: absolute;
+          top: 0;
+          right: 0;
+          z-index: 2147483647;
         `;
         btnContainer.appendChild(btn);
+        
+        // 确保product有定位上下文
+        const computedStyle = window.getComputedStyle(product);
+        if (computedStyle.position === 'static') {
+          product.style.position = 'relative';
+        }
+        
         product.appendChild(btnContainer);
       }
     }
@@ -408,10 +561,21 @@
     
     // 使用事件委托处理所有采集按钮点击
     document.addEventListener('click', (e) => {
+      // 全局采集（单页）
       const globalBtn = e.target.closest('#amazon-collector-global-btn');
       if (globalBtn) {
         console.log('点击了全局采集按钮');
-        handleGlobalCollect();
+        handleGlobalCollect({ mode: 'single' });
+        return;
+      }
+
+      // 批量采集（多页）
+      const multiBtn = e.target.closest('#amazon-collector-multi-btn');
+      if (multiBtn) {
+        const input = document.getElementById('amazon-collector-pages-input');
+        const pages = input ? parseInt(input.value) || 10 : 10;
+        console.log('点击了批量采集按钮，页数:', pages);
+        handleGlobalCollect({ mode: 'multi', targetPages: pages });
         return;
       }
       
@@ -444,8 +608,8 @@
   }
   
   // 处理全局采集
-  async function handleGlobalCollect() {
-    console.log('开始采集本页所有商品');
+  async function handleGlobalCollect(options = { mode: 'single', targetPages: 1 }) {
+    console.log(`开始全局采集，模式: ${options.mode}, 目标页数: ${options.targetPages || 1}`);
     
     // 检查登录状态
     const checkResult = await checkLoginStatus();
@@ -453,7 +617,7 @@
     
     if (!checkResult.isLoggedIn) {
       console.log('未登录，显示登录模态框');
-      showAuthModal(handleGlobalCollect);
+      showAuthModal(() => handleGlobalCollect(options));
       return;
     }
     
@@ -472,12 +636,18 @@
       currentIndex: 0,
       successCount: 0,
       failureCount: 0,
-      totalItems: asins.length
+      totalItems: asins.length,
+      mode: options.mode,
+      targetPages: options.targetPages || 1,
+      pagesCollected: 0
     };
     
     // 显示进度条
     showProgressBar();
     
+    // 保存初始状态
+    await saveCollectionState();
+
     // 开始采集
     startCollection();
   }
@@ -629,7 +799,7 @@
     if (pageType === 'search') {
       productElements = document.querySelectorAll('div[data-component-type="s-search-result"], [data-asin]');
     } else if (pageType === 'bestseller' || pageType === 'new-releases') {
-      productElements = document.querySelectorAll('.zg-item-immersion, .p13n-sc-uncoverable-faceout, .zg-item, .p13n-gridItem, [data-p13n-asin-metadata], [data-asin]');
+      productElements = document.querySelectorAll('.zg-item-immersion, .p13n-sc-uncoverable-faceout, .zg-item, .p13n-gridItem, div[id^="p13n-asin-index"], .a-cardui[data-asin], [data-p13n-asin-metadata], [data-asin]');
     }
     
     // 提取ASIN
@@ -960,17 +1130,30 @@
     }
     
     if (collectionState.currentIndex >= collectionState.queue.length) {
-      // 采集完成
-      collectionState.isCollecting = false;
-      saveCollectionState();
+      // 当前页采集完成
+      console.log('当前页采集完成');
       
-      // 显示完成消息
-      alert(`采集完成！成功: ${collectionState.successCount}, 失败: ${collectionState.failureCount}`);
-      
-      // 隐藏进度条
-      if (progressContainer) {
-        progressContainer.remove();
+      // 检查是否需要翻页
+      if (collectionState.mode === 'multi' && collectionState.pagesCollected < collectionState.targetPages - 1) {
+        console.log(`准备翻页：已采集 ${collectionState.pagesCollected + 1} 页，目标 ${collectionState.targetPages} 页`);
+        
+        // 尝试翻页
+        const hasNextPage = await goToNextPage();
+        if (hasNextPage) {
+          // 更新状态并保存，等待页面加载后自动继续
+          collectionState.pagesCollected++;
+          collectionState.queue = []; // 清空队列，等待新页面加载
+          collectionState.currentIndex = 0;
+          collectionState.totalItems = 0;
+          saveCollectionState();
+          return;
+        } else {
+          console.log('未找到下一页，提前结束采集');
+        }
       }
+
+      // 采集全部完成
+      finishCollection();
       return;
     }
     
@@ -1111,7 +1294,7 @@
       
       if (!productElement) {
         // 如果找不到，遍历所有商品元素检查链接中的ASIN
-        const allProducts = document.querySelectorAll('.zg-item-immersion, .p13n-sc-uncoverable-faceout, .zg-item, .p13n-gridItem');
+        const allProducts = document.querySelectorAll('.zg-item-immersion, .p13n-sc-uncoverable-faceout, .zg-item, .p13n-gridItem, div[id^="p13n-asin-index"], .a-cardui');
         for (const product of allProducts) {
           const link = product.querySelector('a[href*="/dp/"]');
           if (link && link.href.includes(asin)) {
@@ -1177,7 +1360,6 @@
     const productData = {
       asin: asin,
       url: productUrl,
-      raw: productElement.outerHTML,
       cleaned: {
         asin: asin,
         parent_asin: asin,
@@ -1252,7 +1434,6 @@
     const productData = {
       asin: asin,
       url: productUrl,
-      raw: document.documentElement.outerHTML,
       cleaned: {
         asin: asin,
         parent_asin: asin,
@@ -1427,7 +1608,11 @@
             lowerUrl.includes('logo') ||  // 过滤Logo
             lowerUrl.includes('button') || // 过滤按钮
             lowerUrl.includes('stars') ||  // 过滤星星评分
-            lowerUrl.includes('loader')) return false;
+            lowerUrl.includes('loader') || // 过滤加载图
+            lowerUrl.includes('check') ||  // 过滤勾选图标
+            lowerUrl.includes('tick') ||   // 过滤对号
+            lowerUrl.includes('status')    // 过滤状态图标
+           ) return false;
         return true;
     }).map(cleanImageUrl);
     
@@ -1886,6 +2071,7 @@
       </div>
       <div style="font-size: 12px; color: #666; margin-bottom: 10px;">
         <span id="progress-text">0 / 0</span>
+        <span id="page-info" style="margin-left: 10px; font-weight: bold; color: #2196F3;"></span>
         <span style="float: right;">成功: <span id="success-count">0</span> | 失败: <span id="failure-count">0</span></span>
       </div>
       <div style="display: flex; gap: 10px;">
@@ -1938,11 +2124,22 @@
     
     const progressBar = progressContainer.querySelector('#progress-bar');
     const progressText = progressContainer.querySelector('#progress-text');
+    const pageInfo = progressContainer.querySelector('#page-info');
     const successCount = progressContainer.querySelector('#success-count');
     const failureCount = progressContainer.querySelector('#failure-count');
     
     if (progressBar) progressBar.style.width = `${progress}%`;
     if (progressText) progressText.textContent = `${current} / ${total}`;
+    
+    if (pageInfo) {
+      if (collectionState.mode === 'multi') {
+        pageInfo.style.display = 'inline';
+        pageInfo.textContent = `第 ${collectionState.pagesCollected + 1} / ${collectionState.targetPages} 页`;
+      } else {
+        pageInfo.style.display = 'none';
+      }
+    }
+
     if (successCount) successCount.textContent = success;
     if (failureCount) failureCount.textContent = failure;
   }
@@ -1952,12 +2149,93 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
   
-  // 监听页面变化
-  const observer = new MutationObserver(() => {
-    addCollectButtonsToProducts();
-  });
+  // 辅助函数
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // 翻页功能
+  async function goToNextPage() {
+    console.log('正在尝试翻页...');
+    
+    // 尝试查找下一页按钮
+    const nextBtnSelectors = [
+      '.s-pagination-next', // 搜索页
+      'li.a-last a', // Bestseller
+      '.a-pagination .a-last a', // 通用
+      '[class*="pagination"] [class*="next"]', // 模糊匹配
+      'a[title="Next Page"]'
+    ];
+    
+    let nextBtn = null;
+    for (const selector of nextBtnSelectors) {
+      if (selector.includes(':contains')) continue; // 跳过不支持的
+      nextBtn = document.querySelector(selector);
+      
+      // 检查按钮是否禁用
+      if (nextBtn && (nextBtn.classList.contains('s-pagination-disabled') || nextBtn.classList.contains('a-disabled'))) {
+          console.log(`找到下一页按钮 ${selector}，但已禁用`);
+          nextBtn = null;
+          continue;
+      }
+      
+      if (nextBtn) {
+          console.log(`找到下一页按钮: ${selector}`);
+          break;
+      }
+    }
+    
+    // 如果还没找到，尝试通过文本内容查找
+    if (!nextBtn) {
+        const links = document.querySelectorAll('a');
+        for (const link of links) {
+            if (link.textContent.includes('Next') || link.textContent.includes('下一页')) {
+                nextBtn = link;
+                console.log('通过文本找到下一页按钮');
+                break;
+            }
+        }
+    }
+    
+    if (nextBtn) {
+        // 如果是链接且有 href，跳转
+        if (nextBtn.tagName === 'A' && nextBtn.href && !nextBtn.href.includes('#')) {
+            console.log(`跳转到下一页: ${nextBtn.href}`);
+            window.location.href = nextBtn.href;
+            return true;
+        } 
+        // 否则点击
+        console.log('点击下一页按钮');
+        nextBtn.click();
+        return true;
+    }
+    
+    console.log('未找到有效的下一页按钮');
+    return false;
+  }
+
+  // 结束采集
+  function finishCollection() {
+      // 采集完成
+      collectionState.isCollecting = false;
+      saveCollectionState();
+      
+      // 显示完成消息
+      const msg = `采集完成！\n共采集 ${collectionState.pagesCollected + 1} 页\n成功: ${collectionState.successCount}, 失败: ${collectionState.failureCount}`;
+      alert(msg);
+      
+      // 隐藏进度条
+      if (progressContainer) {
+        progressContainer.remove();
+      }
+  }
+
+  // 监听页面变化 (已在init中统一处理)
+  // const observer = new MutationObserver(() => {
+  //   addCollectButtonsToProducts();
+  // });
   
-  observer.observe(document.body, { childList: true, subtree: true });
+  // observer.observe(document.body, { childList: true, subtree: true });
   
   // 初始化
   if (document.readyState === 'loading') {
